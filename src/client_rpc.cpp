@@ -1,87 +1,155 @@
 #include "client_rpc.hpp"
 #include "protocol.hpp"
-#include <iostream>
-#include <cstring>
-#include <random>
-#include <sys/socket.h>
+#include <algorithm>
 #include <arpa/inet.h>
+#include <stdexcept>
+#include <string>
+#include <sys/random.h>
+#include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 
-static int sock_fd;
-static sockaddr_in server_addr;
-static uint64_t current_auth_token;
-static std::mt19937_64 rng(std::random_device{}());
-static uint64_t current_seq_num = 1;
+namespace rpc {
 
-void rpc_init(const char* server_ip, int port) {
-    sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+static uint64_t generate_random_u64() {
+    uint64_t val = 0;
+    if (::getrandom(&val, sizeof(val), 0) != sizeof(val)) {
+        throw std::runtime_error("Error generating random number");
+    }
+    return val;
+}
+
+Client::Client(std::string_view server_ip, uint16_t port) {
+    sock_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock_fd_ < 0) {
+        throw std::runtime_error("Cannot create socket");
+    }
+
+    sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
-    current_auth_token = rng();
+
+    std::string ip_str{server_ip};
+    if (::inet_pton(AF_INET, ip_str.c_str(), &server_addr.sin_addr) <= 0) {
+        ::close(sock_fd_);
+        throw std::runtime_error("Invalid IP address");
+    }
+
+    if (::connect(sock_fd_, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr)) < 0) {
+        ::close(sock_fd_);
+        throw std::runtime_error("Error connecting to server");
+    }
+
+    struct timeval tv{};
+    tv.tv_sec = 2;
+    ::setsockopt(sock_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    auth_token_ = generate_random_u64();
 }
 
-bool send_and_receive(RpcRequest& req, RpcResponse& res) {
-    req.auth_token = current_auth_token;
-    // req.seq_num = rng();
-    req.seq_num = current_seq_num;
-    current_seq_num++;
+Client::~Client() {
+    if (sock_fd_ != -1) {
+        ::close(sock_fd_);
+    }
+}
 
-    for (int attempt = 0; attempt < 2; attempt++) {
-        sendto(sock_fd, &req, sizeof(req), 0, (struct sockaddr*)&server_addr, sizeof(server_addr));
+std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req) {
+    req.auth_token = auth_token_;
+    req.seq_num = generate_random_u64();
 
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(sock_fd, &read_fds);
+    const int MAX_TRIES = 2;
 
-        struct timeval timeout;
-        timeout.tv_sec = 2;
-        timeout.tv_usec = 0;
+    for (int attempt = 0; attempt < MAX_TRIES; attempt++) {
+        if (::send(sock_fd_, &req, sizeof(req), 0) != sizeof(req)) {
+            continue;
+        }
 
-        int ret = select(sock_fd + 1, &read_fds, NULL, NULL, &timeout);
-        if (ret > 0) {
-            socklen_t len = sizeof(server_addr);
-            recvfrom(sock_fd, &res, sizeof(res), 0, (struct sockaddr*)&server_addr, &len);
-            
-            if (res.seq_num == req.seq_num) {
-                return true;
+        protocol::Response res{};
+        while (true) {
+            ssize_t bytes_recv = ::recv(sock_fd_, &res, sizeof(res), 0);
+
+            if (bytes_recv < 0) {
+                break;
             }
-        } else {
-            std::cout << "Timeout żądania, próba " << attempt + 1 << "/2...\n";
+
+            if (bytes_recv == sizeof(res) && res.seq_num == req.seq_num) {
+                return res;
+            }
         }
     }
-    return false;
+
+    return std::nullopt;
 }
 
-RemoteFile *rpc_open(const char *pathname, const char *mode) {
-    RpcRequest req;
-    memset(&req, 0, sizeof(req));
-    req.opcode = OP_OPEN;
-    strncpy(req.pathname, pathname, sizeof(req.pathname) - 1);
-    strncpy(req.mode, mode, sizeof(req.mode) - 1);
+std::optional<File> Client::open(std::string_view pathname, std::string_view mode) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Open;
 
-    RpcResponse res;
-    if (send_and_receive(req, res) && res.status >= 0) {
-        RemoteFile* file = new RemoteFile;
-        file->server_fd = res.status;
-        return file;
+    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
+    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
+
+    auto mode_len = std::min(mode.size(), req.mode.size() - 1);
+    std::copy_n(mode.begin(), mode_len, req.mode.begin());
+
+    auto res_opt = send_with_retry(req);
+
+    if (res_opt && res_opt->status >= 0) {
+        return File{res_opt->status};
     }
-    return nullptr;
+
+    return std::nullopt;
 }
 
-ssize_t rpc_read(RemoteFile *file, void *buf, size_t count) {
-    if (!file) return -1;
-    
-    RpcRequest req;
-    memset(&req, 0, sizeof(req));
-    req.opcode = OP_READ;
-    req.fd = file->server_fd;
-    req.count = count > sizeof(RpcResponse::data) ? sizeof(RpcResponse::data) : count;
+std::ptrdiff_t Client::read(const File &file, std::span<std::byte> buffer) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Read;
+    req.fd = file.fd();
 
-    RpcResponse res;
-    if (send_and_receive(req, res) && res.status >= 0) {
-        memcpy(buf, res.data, res.status);
-        return res.status;
+    constexpr uint64_t MAX_DATA = 1024;
+    req.count = std::min(static_cast<uint64_t>(buffer.size()), MAX_DATA);
+
+    auto res_opt = send_with_retry(req);
+
+    if (res_opt->status > 0) {
+        std::copy_n(res_opt->data.begin(), res_opt->status, buffer.begin());
     }
+
+    return res_opt->status;
+}
+
+std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::SeekWhence whence) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Seek;
+    req.fd = file.fd();
+    req.offset = offset;
+    req.whence = whence;
+
+    auto res_opt = send_with_retry(req);
+
+    if (res_opt->status < 0) {
+        return std::nullopt;
+    }
+
+    return res_opt->offset_result;
+}
+
+std::ptrdiff_t Client::write(const File &file, std::span<const std::byte> buffer) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Write;
+    req.fd = file.fd();
+
+    constexpr uint64_t MAX_DATA = 1024;
+    req.count = std::min(static_cast<uint64_t>(buffer.size()), MAX_DATA);
+
+    std::copy_n(buffer.begin(), req.count, req.data.begin());
+
+    auto res_opt = send_with_retry(req);
+
+    if (res_opt && res_opt->status >= 0) {
+        return res_opt->status;
+    }
+
     return -1;
 }
+
+}  // namespace rpc
