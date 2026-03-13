@@ -1,18 +1,19 @@
 #include "server_rpc.hpp"
 #include "protocol.hpp"
+#include <array>
+#include <cstdio>
 #include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
 #include <stdexcept>
 #include <string_view>
 #include <sys/socket.h>
-#include <thread>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <utility>
 
 namespace rpc {
 
-static void process_udp_request(int sock_fd, protocol::Request req, sockaddr_in client_addr, socklen_t client_len) {
+static void process_udp_request(int sock_fd, const protocol::Request &req, sockaddr_in client_addr, socklen_t client_len) {
     protocol::Response res{};
     res.seq_num = req.seq_num;
     res.status = -1;
@@ -22,35 +23,27 @@ static void process_udp_request(int sock_fd, protocol::Request req, sockaddr_in 
         res.status = -2;  // auth error
     } else {
         if (req.opcode == protocol::Opcode::Open) {
-            req.pathname.back() = '\0';
-            req.mode.back() = '\0';
+            std::array<char, 256> path_copy = req.pathname;
+            std::array<char, 16> mode_copy = req.mode;
+            path_copy.back() = '\0';
+            mode_copy.back() = '\0';
 
-            std::string_view mode_str{req.mode.data()};
+            std::string_view mode_str{mode_copy.data()};
             int flags = O_RDONLY;
             if (mode_str == "w")
-                flags = O_WRONLY | O_CREAT | O_TRUNC;
-            else if (mode_str == "rw")
+                flags = O_WRONLY | O_CREAT;
+            else if (mode_str == "rw" || mode_str == "wr")
                 flags = O_RDWR | O_CREAT;
 
-            int fd = ::open(req.pathname.data(), flags, 0666);
+            int fd = ::open(path_copy.data(), flags, 0666);
             res.status = fd;
         } else if (req.opcode == protocol::Opcode::Read) {
             size_t bytes_to_read = std::min(req.count, static_cast<uint64_t>(res.data.size()));
             ssize_t bytes_read_file = ::read(req.fd, res.data.data(), bytes_to_read);
             res.status = static_cast<int32_t>(bytes_read_file);
         } else if (req.opcode == protocol::Opcode::Seek) {
-            int posix_whence = SEEK_SET;
-            switch (req.whence) {
-                case protocol::SeekWhence::Set:
-                    posix_whence = SEEK_SET;
-                    break;
-                case protocol::SeekWhence::Cur:
-                    posix_whence = SEEK_CUR;
-                    break;
-                case protocol::SeekWhence::End:
-                    posix_whence = SEEK_END;
-                    break;
-            }
+            constexpr std::array SEEK_MAP = {SEEK_SET, SEEK_CUR, SEEK_END};
+            int posix_whence = SEEK_MAP[static_cast<size_t>(req.whence)];
 
             off_t result = ::lseek(req.fd, static_cast<off_t>(req.offset), posix_whence);
             if (result < 0) {
@@ -63,6 +56,20 @@ static void process_udp_request(int sock_fd, protocol::Request req, sockaddr_in 
             size_t bytes_to_write = std::min(req.count, static_cast<uint64_t>(req.data.size()));
             ssize_t bytes_written = ::write(req.fd, req.data.data(), bytes_to_write);
             res.status = static_cast<int32_t>(bytes_written);
+        } else if (req.opcode == protocol::Opcode::Chmod) {
+            std::array<char, 256> path_copy = req.pathname;
+            path_copy.back() = '\0';
+            res.status = ::chmod(path_copy.data(), static_cast<mode_t>(req.file_mode));
+        } else if (req.opcode == protocol::Opcode::Unlink) {
+            std::array<char, 256> path_copy = req.pathname;
+            path_copy.back() = '\0';
+            res.status = ::unlink(path_copy.data());
+        } else if (req.opcode == protocol::Opcode::Rename) {
+            std::array<char, 256> path_copy = req.pathname;
+            std::array<char, 256> new_path_copy = req.new_pathname;
+            path_copy.back() = '\0';
+            new_path_copy.back() = '\0';
+            res.status = ::rename(path_copy.data(), new_path_copy.data());
         }
     }
 
@@ -108,8 +115,7 @@ void Server::run() {
 
         if (bytes_read != sizeof(req)) continue;
 
-        std::thread worker(process_udp_request, sock_fd_, req, client_addr, client_len);
-        worker.detach();
+        process_udp_request(sock_fd_, req, client_addr, client_len);
     }
 }
 

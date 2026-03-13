@@ -1,27 +1,36 @@
 #include "client_rpc.hpp"
+#include <cstdint>
 #include <exception>
+#include <iomanip>
 #include <limits>
 #include <string>
 
 void print_menu() {
-    std::cout << "\n╔═══════════════════════════════════════════╗\n";
-    std::cout << "║         RPC Filesystem - Menu             ║\n";
-    std::cout << "╠═══════════════════════════════════════════╣\n";
-    std::cout << "║ 1. open <path> <mode>     - Open file     ║\n";
-    std::cout << "║ 2. read <bytes>           - Read data     ║\n";
-    std::cout << "║ 3. write <text>           - Write data    ║\n";
-    std::cout << "║ 4. seek <offset> <whence> - Seek position ║\n";
-    std::cout << "║    whence: 0=SET, 1=CUR, 2=END            ║\n";
-    std::cout << "║ 5. close                  - Close file    ║\n";
-    std::cout << "║ 6. help                   - Show help     ║\n";
-    std::cout << "║ 7. exit / quit            - Exit program  ║\n";
-    std::cout << "╚═══════════════════════════════════════════╝\n";
+    std::cout << "╔════════════════════════════════════════════════╗\n";
+    std::cout << "║ 1. open <path> <mode>        - Open file       ║\n";
+    std::cout << "║ 2. read <bytes>              - Read data       ║\n";
+    std::cout << "║ 3. write <text>              - Write data      ║\n";
+    std::cout << "║ 4. seek <offset> <whence>    - Seek position   ║\n";
+    std::cout << "║    whence: 0=SET, 1=CUR, 2=END                 ║\n";
+    std::cout << "║ 5. close                     - Close file      ║\n";
+    std::cout << "║ 6. chmod <path> <mode>       - Change perms    ║\n";
+    std::cout << "║ 7. unlink <path>             - Delete file     ║\n";
+    std::cout << "║ 8. rename <old> <new>        - Rename file     ║\n";
+    std::cout << "║ 9. help                      - Show help       ║\n";
+    std::cout << "║ 10. quit                     - Exit program    ║\n";
+    std::cout << "╚════════════════════════════════════════════════╝\n";
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " <ip> <port>\n";
+        return 1;
+    }
+
     try {
-        rpc::Client client("127.0.0.1", 8080);
-        std::cout << "Connected to server at 127.0.0.1:8080\n";
+        uint16_t port = static_cast<uint16_t>(std::stoi(argv[2]));
+        rpc::Client client(argv[1], port);
+        std::cout << "Connected to server at " << argv[1] << ":" << port << "\n";
 
         std::optional<rpc::File> current_file;
         std::string command;
@@ -32,7 +41,7 @@ int main() {
             std::cout << "\n> ";
             std::cin >> command;
 
-            if (command == "exit" || command == "quit") {
+            if (command == "quit") {
                 std::cout << "Closing client...\n";
                 break;
             } else if (command == "open") {
@@ -167,6 +176,55 @@ int main() {
                     std::cout << "File closed.\n";
                 } else {
                     std::cout << "No file open.\n";
+                }
+            } else if (command == "chmod") {
+                std::string pathname;
+                uint32_t mode;
+                std::cin >> pathname >> std::oct >> mode >> std::dec;
+
+                if (std::cin.fail()) {
+                    std::cin.clear();
+                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                    std::cout << "Usage: chmod <path> <mode>\n";
+                    continue;
+                }
+
+                if (client.chmod(pathname, mode)) {
+                    std::cout << "File permissions changed successfully.\n";
+                } else {
+                    std::cout << "Error: Failed to change file permissions.\n";
+                }
+            } else if (command == "unlink") {
+                std::string pathname;
+                std::cin >> pathname;
+
+                if (std::cin.fail()) {
+                    std::cin.clear();
+                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                    std::cout << "Usage: unlink <path>\n";
+                    continue;
+                }
+
+                if (client.unlink(pathname)) {
+                    std::cout << "File deleted successfully.\n";
+                } else {
+                    std::cout << "Error: Failed to delete file.\n";
+                }
+            } else if (command == "rename") {
+                std::string oldpath, newpath;
+                std::cin >> oldpath >> newpath;
+
+                if (std::cin.fail()) {
+                    std::cin.clear();
+                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                    std::cout << "Usage: rename <oldpath> <newpath>\n";
+                    continue;
+                }
+
+                if (client.rename(oldpath, newpath)) {
+                    std::cout << "File renamed successfully.\n";
+                } else {
+                    std::cout << "Error: Failed to rename file.\n";
                 }
             } else if (command == "help") {
                 print_menu();

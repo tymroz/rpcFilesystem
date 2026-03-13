@@ -11,8 +11,8 @@ namespace rpc {
 
 class File {
    public:
-    explicit File(int fd) noexcept : server_fd_{fd} {}
-    int fd() const noexcept { return server_fd_; }
+    explicit File(int fd) : server_fd_{fd} {}
+    int fd() const { return server_fd_; }
 
    private:
     int server_fd_;
@@ -27,6 +27,10 @@ class Client {
     std::ptrdiff_t read(const File &file, std::span<std::byte> buffer);
     std::optional<int64_t> seek(const File &file, int64_t offset, rpc::protocol::SeekWhence whence);
     std::ptrdiff_t write(const File &file, std::span<const std::byte> buffer);
+
+    bool chmod(std::string_view pathname, uint32_t mode);
+    bool unlink(std::string_view pathname);
+    bool rename(std::string_view oldpath, std::string_view newpath);
 
    private:
     uint64_t auth_token_{0};

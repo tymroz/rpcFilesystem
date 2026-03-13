@@ -3,11 +3,9 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <stdexcept>
-#include <string>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <utility>
 
 namespace rpc {
 
@@ -29,8 +27,7 @@ Client::Client(std::string_view server_ip, uint16_t port) {
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
 
-    std::string ip_str{server_ip};
-    if (::inet_pton(AF_INET, ip_str.c_str(), &server_addr.sin_addr) <= 0) {
+    if (::inet_pton(AF_INET, server_ip.data(), &server_addr.sin_addr) <= 0) {
         ::close(sock_fd_);
         throw std::runtime_error("Invalid IP address");
     }
@@ -40,8 +37,7 @@ Client::Client(std::string_view server_ip, uint16_t port) {
         throw std::runtime_error("Error connecting to server");
     }
 
-    struct timeval tv{};
-    tv.tv_sec = 2;
+    struct timeval tv{.tv_sec = 2, .tv_usec = 0};
     ::setsockopt(sock_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     auth_token_ = generate_random_u64();
@@ -57,7 +53,7 @@ std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req
     req.auth_token = auth_token_;
     req.seq_num = generate_random_u64();
 
-    const int MAX_TRIES = 2;
+    constexpr int MAX_TRIES = 2;
 
     for (int attempt = 0; attempt < MAX_TRIES; attempt++) {
         if (::send(sock_fd_, &req, sizeof(req), 0) != sizeof(req)) {
@@ -105,10 +101,13 @@ std::ptrdiff_t Client::read(const File &file, std::span<std::byte> buffer) {
     req.opcode = protocol::Opcode::Read;
     req.fd = file.fd();
 
-    constexpr uint64_t MAX_DATA = 1024;
-    req.count = std::min(static_cast<uint64_t>(buffer.size()), MAX_DATA);
+    req.count = std::min(static_cast<uint64_t>(buffer.size()), protocol::MAX_DATA_SIZE);
 
     auto res_opt = send_with_retry(req);
+
+    if (!res_opt || res_opt->status < 0) {
+        return -1;
+    }
 
     if (res_opt->status > 0) {
         std::copy_n(res_opt->data.begin(), res_opt->status, buffer.begin());
@@ -126,7 +125,7 @@ std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::
 
     auto res_opt = send_with_retry(req);
 
-    if (res_opt->status < 0) {
+    if (!res_opt || res_opt->status < 0) {
         return std::nullopt;
     }
 
@@ -138,8 +137,7 @@ std::ptrdiff_t Client::write(const File &file, std::span<const std::byte> buffer
     req.opcode = protocol::Opcode::Write;
     req.fd = file.fd();
 
-    constexpr uint64_t MAX_DATA = 1024;
-    req.count = std::min(static_cast<uint64_t>(buffer.size()), MAX_DATA);
+    req.count = std::min(static_cast<uint64_t>(buffer.size()), protocol::MAX_DATA_SIZE);
 
     std::copy_n(buffer.begin(), req.count, req.data.begin());
 
@@ -150,6 +148,46 @@ std::ptrdiff_t Client::write(const File &file, std::span<const std::byte> buffer
     }
 
     return -1;
+}
+
+bool Client::chmod(std::string_view pathname, uint32_t mode) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Chmod;
+    req.file_mode = mode;
+
+    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
+    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
+
+    auto res_opt = send_with_retry(req);
+
+    return res_opt && res_opt->status == 0;
+}
+
+bool Client::unlink(std::string_view pathname) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Unlink;
+
+    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
+    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
+
+    auto res_opt = send_with_retry(req);
+
+    return res_opt && res_opt->status == 0;
+}
+
+bool Client::rename(std::string_view oldpath, std::string_view newpath) {
+    protocol::Request req{};
+    req.opcode = protocol::Opcode::Rename;
+
+    auto oldpath_len = std::min(oldpath.size(), req.pathname.size() - 1);
+    std::copy_n(oldpath.begin(), oldpath_len, req.pathname.begin());
+
+    auto newpath_len = std::min(newpath.size(), req.new_pathname.size() - 1);
+    std::copy_n(newpath.begin(), newpath_len, req.new_pathname.begin());
+
+    auto res_opt = send_with_retry(req);
+
+    return res_opt && res_opt->status == 0;
 }
 
 }  // namespace rpc
