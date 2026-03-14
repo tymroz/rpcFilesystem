@@ -17,6 +17,12 @@ static uint64_t generate_random_u64() {
     return val;
 }
 
+template <size_t N>
+static void fill_buffer(std::array<char, N> &dest, std::string_view src) {
+    const size_t len = std::min(src.size(), N - 1);
+    std::copy_n(src.begin(), len, dest.begin());
+}
+
 Client::Client(std::string_view server_ip, uint16_t port) {
     sock_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd_ < 0) {
@@ -53,9 +59,7 @@ std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req
     req.auth_token = auth_token_;
     req.seq_num = generate_random_u64();
 
-    constexpr int MAX_TRIES = 2;
-
-    for (int attempt = 0; attempt < MAX_TRIES; attempt++) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
         if (::send(sock_fd_, &req, sizeof(req), 0) != sizeof(req)) {
             continue;
         }
@@ -64,56 +68,39 @@ std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req
         while (true) {
             ssize_t bytes_recv = ::recv(sock_fd_, &res, sizeof(res), 0);
 
-            if (bytes_recv < 0) {
-                break;
-            }
+            if (bytes_recv < 0) break;
 
             if (bytes_recv == sizeof(res) && res.seq_num == req.seq_num) {
                 return res;
             }
         }
     }
-
     return std::nullopt;
 }
 
 std::optional<File> Client::open(std::string_view pathname, std::string_view mode) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Open;
+    fill_buffer(req.pathname, pathname);
+    fill_buffer(req.mode, mode);
 
-    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
-    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
-
-    auto mode_len = std::min(mode.size(), req.mode.size() - 1);
-    std::copy_n(mode.begin(), mode_len, req.mode.begin());
-
-    auto res_opt = send_with_retry(req);
-
-    if (res_opt && res_opt->status >= 0) {
-        return File{res_opt->status};
-    }
-
-    return std::nullopt;
+    auto res = send_with_retry(req);
+    return (res && res->status >= 0) ? std::make_optional<File>(res->status) : std::nullopt;
 }
 
 std::ptrdiff_t Client::read(const File &file, std::span<std::byte> buffer) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Read;
     req.fd = file.fd();
+    req.count = std::min<uint64_t>(buffer.size(), protocol::MAX_DATA_SIZE);
 
-    req.count = std::min(static_cast<uint64_t>(buffer.size()), protocol::MAX_DATA_SIZE);
+    auto res = send_with_retry(req);
+    if (!res || res->status < 0) return -1;
 
-    auto res_opt = send_with_retry(req);
-
-    if (!res_opt || res_opt->status < 0) {
-        return -1;
+    if (res->status > 0) {
+        std::copy_n(res->data.begin(), res->status, buffer.begin());
     }
-
-    if (res_opt->status > 0) {
-        std::copy_n(res_opt->data.begin(), res_opt->status, buffer.begin());
-    }
-
-    return res_opt->status;
+    return res->status;
 }
 
 std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::SeekWhence whence) {
@@ -123,71 +110,49 @@ std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::
     req.offset = offset;
     req.whence = whence;
 
-    auto res_opt = send_with_retry(req);
-
-    if (!res_opt || res_opt->status < 0) {
-        return std::nullopt;
-    }
-
-    return res_opt->offset_result;
+    auto res = send_with_retry(req);
+    return (res && res->status >= 0) ? std::make_optional(res->offset_result) : std::nullopt;
 }
 
 std::ptrdiff_t Client::write(const File &file, std::span<const std::byte> buffer) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Write;
     req.fd = file.fd();
-
-    req.count = std::min(static_cast<uint64_t>(buffer.size()), protocol::MAX_DATA_SIZE);
+    req.count = std::min<uint64_t>(buffer.size(), protocol::MAX_DATA_SIZE);
 
     std::copy_n(buffer.begin(), req.count, req.data.begin());
 
-    auto res_opt = send_with_retry(req);
-
-    if (res_opt && res_opt->status >= 0) {
-        return res_opt->status;
-    }
-
-    return -1;
+    auto res = send_with_retry(req);
+    return (res && res->status >= 0) ? res->status : -1;
 }
 
 bool Client::chmod(std::string_view pathname, uint32_t mode) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Chmod;
     req.file_mode = mode;
+    fill_buffer(req.pathname, pathname);
 
-    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
-    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
-
-    auto res_opt = send_with_retry(req);
-
-    return res_opt && res_opt->status == 0;
+    auto res = send_with_retry(req);
+    return res && res->status == 0;
 }
 
 bool Client::unlink(std::string_view pathname) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Unlink;
+    fill_buffer(req.pathname, pathname);
 
-    auto path_len = std::min(pathname.size(), req.pathname.size() - 1);
-    std::copy_n(pathname.begin(), path_len, req.pathname.begin());
-
-    auto res_opt = send_with_retry(req);
-
-    return res_opt && res_opt->status == 0;
+    auto res = send_with_retry(req);
+    return res && res->status == 0;
 }
 
 bool Client::rename(std::string_view oldpath, std::string_view newpath) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Rename;
+    fill_buffer(req.pathname, oldpath);
+    fill_buffer(req.new_pathname, newpath);
 
-    auto oldpath_len = std::min(oldpath.size(), req.pathname.size() - 1);
-    std::copy_n(oldpath.begin(), oldpath_len, req.pathname.begin());
-
-    auto newpath_len = std::min(newpath.size(), req.new_pathname.size() - 1);
-    std::copy_n(newpath.begin(), newpath_len, req.new_pathname.begin());
-
-    auto res_opt = send_with_retry(req);
-
-    return res_opt && res_opt->status == 0;
+    auto res = send_with_retry(req);
+    return res && res->status == 0;
 }
 
 }  // namespace rpc
