@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <endian.h>
+#include <netinet/in.h>
 
 namespace rpc::protocol {
 
@@ -38,5 +40,35 @@ struct Response {
     std::array<std::byte, MAX_DATA_SIZE> data;
     int64_t offset_result;
 };
+
+inline void request_to_network(Request& req) {
+    req.auth_token = htobe64(req.auth_token);
+    req.seq_num = htobe64(req.seq_num);
+    req.count = htobe64(req.count);
+    req.offset = htobe64(static_cast<uint64_t>(req.offset));
+    req.fd = htonl(req.fd);
+    req.file_mode = htonl(req.file_mode);
+}
+
+inline void request_from_network(Request& req) {
+    req.auth_token = be64toh(req.auth_token);
+    req.seq_num = be64toh(req.seq_num);
+    req.count = be64toh(req.count);
+    req.offset = static_cast<int64_t>(be64toh(static_cast<uint64_t>(req.offset)));
+    req.fd = ntohl(req.fd);
+    req.file_mode = ntohl(req.file_mode);
+}
+
+inline void response_to_network(Response& res) {
+    res.seq_num = htobe64(res.seq_num);
+    res.status = htonl(res.status);
+    res.offset_result = htobe64(static_cast<uint64_t>(res.offset_result));
+}
+
+inline void response_from_network(Response& res) {
+    res.seq_num = be64toh(res.seq_num);
+    res.status = ntohl(res.status);
+    res.offset_result = static_cast<int64_t>(be64toh(static_cast<uint64_t>(res.offset_result)));
+}
 
 }  // namespace rpc::protocol

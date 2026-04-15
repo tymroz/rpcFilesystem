@@ -3,7 +3,7 @@
 #include <exception>
 #include <iostream>
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     if (argc != 2) {
         std::cerr << "Usage: " << argv[0] << " <port>\n";
         return 1;
@@ -15,7 +15,7 @@ int main(int argc, char *argv[]) {
 
         server.run();
 
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
         std::cerr << "[SERVER ERROR]: " << e.what() << '\n';
         return 1;
     }

@@ -24,9 +24,9 @@ class Client {
     ~Client();
 
     std::optional<File> open(std::string_view pathname, std::string_view mode);
-    std::ptrdiff_t read(const File &file, std::span<std::byte> buffer);
-    std::optional<int64_t> seek(const File &file, int64_t offset, rpc::protocol::SeekWhence whence);
-    std::ptrdiff_t write(const File &file, std::span<const std::byte> buffer);
+    std::ptrdiff_t read(const File& file, std::span<std::byte> buffer);
+    std::optional<int64_t> seek(const File& file, int64_t offset, rpc::protocol::SeekWhence whence);
+    std::ptrdiff_t write(const File& file, std::span<const std::byte> buffer);
 
     bool chmod(std::string_view pathname, uint32_t mode);
     bool unlink(std::string_view pathname);
@@ -34,9 +34,10 @@ class Client {
 
    private:
     uint64_t auth_token_{0};
+    uint64_t seq_num_{0};
     int sock_fd_{-1};
 
-    std::optional<protocol::Response> send_with_retry(protocol::Request &req);
+    std::optional<protocol::Response> send_with_retry(protocol::Request& req);
 };
 
 }  // namespace rpc

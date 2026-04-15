@@ -18,7 +18,7 @@ static uint64_t generate_random_u64() {
 }
 
 template <size_t N>
-static void fill_buffer(std::array<char, N> &dest, std::string_view src) {
+static void fill_buffer(std::array<char, N>& dest, std::string_view src) {
     const size_t len = std::min(src.size(), N - 1);
     std::copy_n(src.begin(), len, dest.begin());
 }
@@ -38,7 +38,7 @@ Client::Client(std::string_view server_ip, uint16_t port) {
         throw std::runtime_error("Invalid IP address");
     }
 
-    if (::connect(sock_fd_, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr)) < 0) {
+    if (::connect(sock_fd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
         ::close(sock_fd_);
         throw std::runtime_error("Error connecting to server");
     }
@@ -55,12 +55,15 @@ Client::~Client() {
     }
 }
 
-std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req) {
+std::optional<protocol::Response> Client::send_with_retry(protocol::Request& req) {
     req.auth_token = auth_token_;
-    req.seq_num = generate_random_u64();
+    req.seq_num = ++seq_num_;
+
+    protocol::Request req_network = req;
+    protocol::request_to_network(req_network);
 
     for (int attempt = 0; attempt < 2; ++attempt) {
-        if (::send(sock_fd_, &req, sizeof(req), 0) != sizeof(req)) {
+        if (::send(sock_fd_, &req_network, sizeof(req_network), 0) != sizeof(req_network)) {
             continue;
         }
 
@@ -70,8 +73,11 @@ std::optional<protocol::Response> Client::send_with_retry(protocol::Request &req
 
             if (bytes_recv < 0) break;
 
-            if (bytes_recv == sizeof(res) && res.seq_num == req.seq_num) {
-                return res;
+            if (bytes_recv == sizeof(res)) {
+                protocol::response_from_network(res);
+                if (res.seq_num == req.seq_num) {
+                    return res;
+                }
             }
         }
     }
@@ -88,7 +94,7 @@ std::optional<File> Client::open(std::string_view pathname, std::string_view mod
     return (res && res->status >= 0) ? std::make_optional<File>(res->status) : std::nullopt;
 }
 
-std::ptrdiff_t Client::read(const File &file, std::span<std::byte> buffer) {
+std::ptrdiff_t Client::read(const File& file, std::span<std::byte> buffer) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Read;
     req.fd = file.fd();
@@ -103,7 +109,7 @@ std::ptrdiff_t Client::read(const File &file, std::span<std::byte> buffer) {
     return res->status;
 }
 
-std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::SeekWhence whence) {
+std::optional<int64_t> Client::seek(const File& file, int64_t offset, protocol::SeekWhence whence) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Seek;
     req.fd = file.fd();
@@ -114,7 +120,7 @@ std::optional<int64_t> Client::seek(const File &file, int64_t offset, protocol::
     return (res && res->status >= 0) ? std::make_optional(res->offset_result) : std::nullopt;
 }
 
-std::ptrdiff_t Client::write(const File &file, std::span<const std::byte> buffer) {
+std::ptrdiff_t Client::write(const File& file, std::span<const std::byte> buffer) {
     protocol::Request req{};
     req.opcode = protocol::Opcode::Write;
     req.fd = file.fd();
